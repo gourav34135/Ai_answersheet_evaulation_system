@@ -69,6 +69,7 @@ class EvaluationResult:
     feedback: list[str]
     matched_points: list[str]
     missing_points: list[str]
+    question_results: list[dict]
 
     def as_dict(self) -> dict:
         return {
@@ -80,6 +81,7 @@ class EvaluationResult:
             "feedback": self.feedback,
             "matched_points": self.matched_points,
             "missing_points": self.missing_points,
+            "question_results": self.question_results,
         }
 
 
@@ -261,6 +263,55 @@ def split_reference_blocks(reference_answer: str) -> list[str]:
     return blocks
 
 
+def question_title(block: str, index: int) -> str:
+    first_line = next((line.strip() for line in block.splitlines() if line.strip()), "")
+    cleaned = re.sub(r"^\s*\d+\.\s*", "", first_line).strip()
+    if cleaned and len(cleaned) <= 180:
+        return cleaned
+    return f"Question {index}"
+
+
+def question_reference_body(block: str) -> str:
+    lines = [line.strip() for line in block.splitlines() if line.strip()]
+    if len(lines) > 1 and re.match(r"^\s*\d+\.\s+", lines[0]):
+        return "\n".join(lines[1:])
+    return block
+
+
+def evaluate_question_sections(
+    student_answer: str,
+    reference_answer: str,
+    max_score: float,
+) -> list[dict]:
+    blocks = split_reference_blocks(reference_answer)
+    if not blocks:
+        return []
+
+    section_max = max_score / len(blocks)
+    results = []
+    for index, block in enumerate(blocks, start=1):
+        body = question_reference_body(block)
+        similarity = text_similarity(student_answer, body)
+        concepts = reference_concept_coverage(student_answer, body)
+        keywords = fuzzy_keyword_coverage(student_answer, body, limit=24)
+        raw = float(np.clip((0.35 * similarity) + (0.45 * concepts) + (0.2 * keywords), 0.0, 1.0))
+        section_score = round(raw * section_max, 2)
+        results.append(
+            {
+                "number": index,
+                "title": question_title(block, index),
+                "score": section_score,
+                "max_score": round(section_max, 2),
+                "percentage": round(raw * 100, 1),
+                "semantic_similarity": round(similarity, 3),
+                "concept_coverage": round(concepts, 3),
+                "keyword_coverage": round(keywords, 3),
+                "status": "Strong" if raw >= 0.72 else "Partial" if raw >= 0.42 else "Needs review",
+            }
+        )
+    return results
+
+
 def point_coverage(
     student_answer: str,
     points: list[str],
@@ -403,6 +454,7 @@ def evaluate_answer(
     similarity = text_similarity(student_answer, reference_answer)
     coverage, matched, missing = point_coverage(student_answer, marking_points, reference_answer)
     concept_coverage = reference_concept_coverage(student_answer, reference_answer)
+    question_results = evaluate_question_sections(student_answer, reference_answer, max_score)
     completeness = length_quality(student_answer, reference_answer)
     readability = readability_quality(student_answer)
 
@@ -420,6 +472,10 @@ def evaluate_answer(
         raw = (0.75 * coverage) + (0.15 * completeness) + (0.1 * readability)
     else:
         raw = (0.55 * readability) + (0.45 * min(1.0, len(tokenize(student_answer)) / 120))
+
+    if len(question_results) > 1:
+        question_raw = sum(item["score"] for item in question_results) / max_score
+        raw = (0.7 * raw) + (0.3 * question_raw)
 
     score = round(float(np.clip(raw, 0.0, 1.0)) * max_score, 2)
     percentage = round((score / max_score) * 100, 1) if max_score else 0.0
@@ -454,6 +510,7 @@ def evaluate_answer(
         feedback=feedback,
         matched_points=matched,
         missing_points=missing,
+        question_results=question_results,
     )
 
 

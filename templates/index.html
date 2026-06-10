@@ -10,20 +10,29 @@
     <main class="app-shell">
         <section class="workspace">
             <header class="topbar">
-                <div>
-                    <p class="eyebrow">Local OCR + NLP / Version 2.0</p>
+                <div class="brand-block">
+                    <p class="eyebrow">Local Intelligence / Version 3.0</p>
                     <h1>AI Answer Sheet Evaluator</h1>
+                    <p class="brand-subtitle">Handwriting OCR, concept matching, rubric evaluation, and downloadable evidence.</p>
                 </div>
                 <div class="top-actions">
-                    <button class="ghost-button" id="loadDemoBtn" type="button">Load Demo Rubric</button>
-                    <button class="ghost-button" id="refreshHistoryBtn" type="button">Refresh History</button>
+                    <button class="ghost-button" id="loadDemoBtn" type="button">Load Example</button>
+                    <button class="ghost-button" id="refreshHistoryBtn" type="button">Refresh</button>
                     <a class="ghost-button" href="#historyPanel">History</a>
                 </div>
             </header>
 
+            <section class="pipeline" aria-label="Evaluation pipeline">
+                <div class="pipeline-step active" data-pipeline="upload"><span>01</span><strong>Input</strong></div>
+                <div class="pipeline-step" data-pipeline="ocr"><span>02</span><strong>OCR</strong></div>
+                <div class="pipeline-step" data-pipeline="concepts"><span>03</span><strong>Concepts</strong></div>
+                <div class="pipeline-step" data-pipeline="rubric"><span>04</span><strong>Rubric</strong></div>
+                <div class="pipeline-step" data-pipeline="report"><span>05</span><strong>Report</strong></div>
+            </section>
+
             <section class="hero-grid">
                 <form class="evaluation-form" id="evaluationForm">
-                    <div class="form-row two">
+                    <div class="form-row three">
                         <label>
                             Student name
                             <input type="text" name="student_name" placeholder="Example: Arjun S." autocomplete="off">
@@ -32,6 +41,17 @@
                             Maximum score
                             <input type="number" name="max_score" min="1" max="100" step="0.5" value="10">
                         </label>
+                        <fieldset class="engine-control">
+                            <legend>OCR engine</legend>
+                            <label>
+                                <input type="radio" name="ocr_engine" value="standard" checked>
+                                <span>Standard</span>
+                            </label>
+                            <label>
+                                <input type="radio" name="ocr_engine" value="transformer">
+                                <span>Transformer</span>
+                            </label>
+                        </fieldset>
                     </div>
 
                     <label class="upload-zone" id="dropZone">
@@ -70,51 +90,41 @@
                             <span id="scoreMeter"></span>
                         </div>
                         <p id="confidenceValue">Waiting for an answer sheet</p>
+                        <a class="report-button disabled" id="downloadReportBtn" href="#" aria-disabled="true">Download PDF Report</a>
                     </div>
 
-                    <div class="result-block">
-                        <h2>Feedback</h2>
-                        <ul id="feedbackList">
-                            <li>Upload an answer sheet and add a reference answer for the most reliable result.</li>
-                        </ul>
-                    </div>
-
-                    <div class="result-block metrics-grid">
-                        <div>
-                            <span>Similarity</span>
-                            <strong id="metricSimilarity">0.000</strong>
+                    <div class="result-block metric-bars">
+                        <div class="metric-bar">
+                            <div><span>Semantic similarity</span><strong id="metricSimilarity">0%</strong></div>
+                            <div class="bar"><span id="barSimilarity"></span></div>
                         </div>
-                        <div>
-                            <span>Concepts</span>
-                            <strong id="metricConcepts">0.000</strong>
+                        <div class="metric-bar">
+                            <div><span>Concept coverage</span><strong id="metricConcepts">0%</strong></div>
+                            <div class="bar"><span id="barConcepts"></span></div>
                         </div>
-                        <div>
-                            <span>Rubric</span>
-                            <strong id="metricCoverage">0.000</strong>
+                        <div class="metric-bar">
+                            <div><span>Rubric coverage</span><strong id="metricCoverage">0%</strong></div>
+                            <div class="bar"><span id="barCoverage"></span></div>
                         </div>
-                        <div>
-                            <span>Words</span>
-                            <strong id="metricWords">0</strong>
-                        </div>
+                        <div class="metric-summary"><span>Recognized words</span><strong id="metricWords">0</strong></div>
                     </div>
                 </aside>
             </section>
 
             <section class="content-grid">
-                <article class="text-panel">
+                <article class="text-panel question-panel">
                     <div class="section-title">
-                        <h2>Extracted Text</h2>
-                        <div class="top-actions">
-                            <button class="ghost-button compact" id="copyTextBtn" type="button">Copy</button>
-                            <button class="ghost-button compact" id="rescoreBtn" type="button">Re-score Text</button>
-                        </div>
+                        <h2>Question Results</h2>
+                        <span class="section-stat" id="questionCount">0 evaluated</span>
                     </div>
-                    <textarea id="extractedText" rows="14">OCR output will appear here.</textarea>
+                    <div class="question-results" id="questionResults">
+                        <p class="empty-state">Question-level scores will appear after evaluation.</p>
+                    </div>
                 </article>
 
                 <article class="text-panel">
                     <div class="section-title">
-                        <h2>Detected Points</h2>
+                        <h2>Rubric Findings</h2>
                     </div>
                     <div class="points-columns">
                         <div>
@@ -126,6 +136,28 @@
                             <ul id="missingPoints"></ul>
                         </div>
                     </div>
+                </article>
+            </section>
+
+            <section class="content-grid secondary-results">
+                <article class="text-panel">
+                    <div class="section-title">
+                        <h2>Feedback</h2>
+                    </div>
+                    <ol class="feedback-list" id="feedbackList">
+                        <li>Evaluation feedback will appear here.</li>
+                    </ol>
+                </article>
+
+                <article class="text-panel review-panel">
+                    <details id="ocrReview">
+                        <summary>Technical OCR Review</summary>
+                        <div class="section-title review-title">
+                            <span class="section-stat">Optional transcription audit</span>
+                            <button class="ghost-button compact" id="copyTextBtn" type="button">Copy OCR</button>
+                        </div>
+                        <pre id="extractedText">OCR output will appear here.</pre>
+                    </details>
                 </article>
             </section>
         </section>

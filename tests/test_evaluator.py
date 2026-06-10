@@ -35,6 +35,25 @@ class EvaluatorRegressionTests(unittest.TestCase):
         self.assertGreaterEqual(result.metrics["concept_coverage"], 0.65)
         self.assertEqual(len(result.missing_points), 0)
 
+    def test_numbered_reference_answers_produce_question_results(self):
+        reference = """1. Explain photosynthesis.
+Photosynthesis uses sunlight, water, and carbon dioxide to make glucose and oxygen.
+
+2. Explain the water cycle.
+The water cycle includes evaporation, condensation, precipitation, and collection."""
+        answer = """Plants use sunlight, carbon dioxide, and water to make glucose and release oxygen.
+The water cycle moves through evaporation, condensation, precipitation, and collection."""
+
+        result = evaluate_answer(
+            student_answer=answer,
+            reference_answer=reference,
+            marking_points_text="Uses correct terminology\nDefines important stages",
+            max_score=10,
+        )
+
+        self.assertEqual(len(result.question_results), 2)
+        self.assertGreaterEqual(result.score, 7)
+
 
 if __name__ == "__main__":
     unittest.main()

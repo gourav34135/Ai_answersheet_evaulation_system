@@ -11,13 +11,16 @@ const feedbackList = document.querySelector("#feedbackList");
 const extractedText = document.querySelector("#extractedText");
 const matchedPoints = document.querySelector("#matchedPoints");
 const missingPoints = document.querySelector("#missingPoints");
+const questionResults = document.querySelector("#questionResults");
+const questionCount = document.querySelector("#questionCount");
 const historyList = document.querySelector("#historyList");
 const refreshHistoryBtn = document.querySelector("#refreshHistoryBtn");
 const loadDemoBtn = document.querySelector("#loadDemoBtn");
 const clearHistoryBtn = document.querySelector("#clearHistoryBtn");
 const copyTextBtn = document.querySelector("#copyTextBtn");
-const rescoreBtn = document.querySelector("#rescoreBtn");
+const downloadReportBtn = document.querySelector("#downloadReportBtn");
 const toast = document.querySelector("#toast");
+const pipelineSteps = [...document.querySelectorAll(".pipeline-step")];
 
 let toastTimer = null;
 
@@ -31,6 +34,9 @@ function showToast(message) {
 function setLoading(isLoading) {
     form.classList.toggle("loading", isLoading);
     evaluateBtn.textContent = isLoading ? "Evaluating..." : "Evaluate Answer";
+    if (isLoading) {
+        setPipeline("ocr");
+    }
 }
 
 function updateFileName() {
@@ -63,24 +69,74 @@ function renderResult(payload) {
     scoreValue.textContent = `${score} / ${maxScore}`;
     scoreMeter.style.width = `${Math.max(0, Math.min(100, percentage))}%`;
     confidenceValue.textContent = `Confidence: ${result.confidence}`;
-    setExtractedText(payload.extracted_text || "No extracted text available.");
+    extractedText.textContent = payload.extracted_text || "No extracted text available.";
+    setReportLink(payload.id);
 
     renderList(feedbackList, result.feedback, "No feedback available.");
     renderList(matchedPoints, result.matched_points, "No matched points detected.");
     renderList(missingPoints, result.missing_points, "No missing points detected.");
+    renderQuestionResults(result.question_results || []);
 
-    document.querySelector("#metricSimilarity").textContent = result.metrics.semantic_similarity.toFixed(3);
-    document.querySelector("#metricConcepts").textContent = (result.metrics.concept_coverage || 0).toFixed(3);
-    document.querySelector("#metricCoverage").textContent = result.metrics.key_point_coverage.toFixed(3);
+    setMetric("Similarity", result.metrics.semantic_similarity);
+    setMetric("Concepts", result.metrics.concept_coverage || 0);
+    setMetric("Coverage", result.metrics.key_point_coverage);
     document.querySelector("#metricWords").textContent = result.metrics.word_count;
+    setPipeline("report");
 }
 
-function setExtractedText(value) {
-    extractedText.value = value;
+function setMetric(name, value) {
+    const percentage = Math.round(Number(value || 0) * 100);
+    document.querySelector(`#metric${name}`).textContent = `${percentage}%`;
+    document.querySelector(`#bar${name}`).style.width = `${Math.max(0, Math.min(100, percentage))}%`;
 }
 
-function getExtractedText() {
-    return extractedText.value || "";
+function setPipeline(stage) {
+    const stages = ["upload", "ocr", "concepts", "rubric", "report"];
+    const current = stages.indexOf(stage);
+    pipelineSteps.forEach((step, index) => {
+        step.classList.toggle("active", index <= current);
+        step.classList.toggle("current", index === current);
+    });
+}
+
+function setReportLink(id) {
+    if (!id) {
+        downloadReportBtn.href = "#";
+        downloadReportBtn.classList.add("disabled");
+        downloadReportBtn.setAttribute("aria-disabled", "true");
+        return;
+    }
+    downloadReportBtn.href = `/api/report/${id}`;
+    downloadReportBtn.classList.remove("disabled");
+    downloadReportBtn.setAttribute("aria-disabled", "false");
+}
+
+function renderQuestionResults(items) {
+    questionResults.innerHTML = "";
+    questionCount.textContent = `${items.length} evaluated`;
+
+    if (!items.length) {
+        questionResults.innerHTML = '<p class="empty-state">Question-level scores will appear after evaluation.</p>';
+        return;
+    }
+
+    items.forEach((item) => {
+        const row = document.createElement("article");
+        row.className = "question-result";
+        const statusClass = String(item.status).toLowerCase().replaceAll(" ", "-");
+        row.innerHTML = `
+            <div class="question-number">${item.number}</div>
+            <div class="question-copy">
+                <strong>${escapeHtml(item.title)}</strong>
+                <div class="question-track"><span style="width:${Math.max(0, Math.min(100, item.percentage))}%"></span></div>
+            </div>
+            <div class="question-score">
+                <strong>${item.score} / ${item.max_score}</strong>
+                <span class="status-${statusClass}">${escapeHtml(item.status)}</span>
+            </div>
+        `;
+        questionResults.appendChild(row);
+    });
 }
 
 async function loadHistory() {
@@ -107,12 +163,26 @@ async function loadHistory() {
             <small>${escapeHtml(item.created_at)} | ${escapeHtml(item.confidence)} confidence</small>
             <div class="history-actions">
                 <button type="button" data-action="view" data-id="${item.id}">View</button>
-                <a href="/api/report/${item.id}">Report</a>
+                <a href="/api/report/${item.id}">PDF Report</a>
                 <button class="delete-button" type="button" data-action="delete" data-id="${item.id}">Delete</button>
             </div>
         `;
         historyList.appendChild(wrapper);
     });
+}
+
+async function loadHealth() {
+    try {
+        const response = await fetch("/api/health");
+        const data = await response.json();
+        const transformerInput = form.querySelector('[name="ocr_engine"][value="transformer"]');
+        if (transformerInput && !data.transformer_available) {
+            transformerInput.disabled = true;
+            transformerInput.parentElement.title = "Install requirements-advanced.txt with Python 3.12 to enable Transformer OCR.";
+        }
+    } catch (error) {
+        console.warn("Health check unavailable", error);
+    }
 }
 
 function escapeHtml(value) {
@@ -150,19 +220,17 @@ form.addEventListener("submit", async (event) => {
 
     setLoading(true);
     try {
-        const response = await fetch("/api/evaluate", {
-            method: "POST",
-            body: formData,
-        });
+        const response = await fetch("/api/evaluate", { method: "POST", body: formData });
         const data = await response.json();
         if (!response.ok) {
             throw new Error(data.error || "Evaluation failed.");
         }
-
+        setPipeline("concepts");
         renderResult(data);
         await loadHistory();
-        showToast("Evaluation saved to history.");
+        showToast("Evaluation completed and saved.");
     } catch (error) {
+        setPipeline("upload");
         showToast(error.message);
     } finally {
         setLoading(false);
@@ -172,17 +240,20 @@ form.addEventListener("submit", async (event) => {
 resetBtn.addEventListener("click", () => {
     setTimeout(() => {
         updateFileName();
-        setExtractedText("OCR output will appear here.");
+        extractedText.textContent = "OCR output will appear here.";
         scoreValue.textContent = "0 / 10";
         scoreMeter.style.width = "0";
         confidenceValue.textContent = "Waiting for an answer sheet";
-        document.querySelector("#metricSimilarity").textContent = "0.000";
-        document.querySelector("#metricConcepts").textContent = "0.000";
-        document.querySelector("#metricCoverage").textContent = "0.000";
+        setMetric("Similarity", 0);
+        setMetric("Concepts", 0);
+        setMetric("Coverage", 0);
         document.querySelector("#metricWords").textContent = "0";
-        renderList(feedbackList, ["Upload an answer sheet and add a reference answer for the most reliable result."], "");
+        renderList(feedbackList, ["Evaluation feedback will appear here."], "");
         renderList(matchedPoints, [], "No matched points detected.");
         renderList(missingPoints, [], "No missing points detected.");
+        renderQuestionResults([]);
+        setReportLink(null);
+        setPipeline("upload");
     }, 0);
 });
 
@@ -209,13 +280,13 @@ loadDemoBtn.addEventListener("click", async () => {
         const response = await fetch("/api/demo-rubric");
         const data = await response.json();
         if (!response.ok) {
-            throw new Error(data.error || "Could not load demo rubric.");
+            throw new Error(data.error || "Could not load example.");
         }
         form.elements.question.value = data.questions;
         form.elements.reference_answer.value = data.reference_answers;
         form.elements.marking_points.value = data.marking_points;
         form.elements.max_score.value = data.max_score;
-        showToast("Five-question demo rubric loaded.");
+        showToast("Example questions and rubric loaded.");
     } catch (error) {
         showToast(error.message);
     }
@@ -235,10 +306,7 @@ historyList.addEventListener("click", async (event) => {
             showToast(item.error || "Could not load history item.");
             return;
         }
-        renderResult({
-            extracted_text: item.extracted_text,
-            result: item.result,
-        });
+        renderResult({ id: item.id, extracted_text: item.extracted_text, result: item.result });
         showToast("History item loaded.");
     }
 
@@ -255,39 +323,17 @@ historyList.addEventListener("click", async (event) => {
 });
 
 copyTextBtn.addEventListener("click", async () => {
-    await navigator.clipboard.writeText(getExtractedText());
-    showToast("Extracted text copied.");
+    await navigator.clipboard.writeText(extractedText.textContent || "");
+    showToast("OCR transcription copied.");
 });
 
-rescoreBtn.addEventListener("click", async () => {
-    const payload = {
-        extracted_text: getExtractedText(),
-        student_name: new FormData(form).get("student_name") || "Edited OCR",
-        question: new FormData(form).get("question") || "",
-        reference_answer: new FormData(form).get("reference_answer") || "",
-        marking_points: new FormData(form).get("marking_points") || "",
-        max_score: new FormData(form).get("max_score") || "10",
-    };
-
-    setLoading(true);
-    try {
-        const response = await fetch("/api/rescore", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-        });
-        const data = await response.json();
-        if (!response.ok) {
-            throw new Error(data.error || "Re-score failed.");
-        }
-        renderResult(data);
-        await loadHistory();
-        showToast("Edited text re-scored and saved.");
-    } catch (error) {
-        showToast(error.message);
-    } finally {
-        setLoading(false);
+downloadReportBtn.addEventListener("click", (event) => {
+    if (downloadReportBtn.classList.contains("disabled")) {
+        event.preventDefault();
+        showToast("Evaluate an answer sheet before downloading a report.");
     }
 });
 
+setPipeline("upload");
+loadHealth();
 loadHistory();

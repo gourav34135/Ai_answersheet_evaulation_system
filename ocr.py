@@ -10,6 +10,10 @@ class OCRDependencyError(RuntimeError):
     pass
 
 
+_TROCR_PROCESSOR = None
+_TROCR_MODEL = None
+
+
 def _import_pytesseract():
     try:
         import pytesseract
@@ -313,6 +317,52 @@ def _fast_pdf_ocr(pytesseract, image: Image.Image) -> str:
     return _clean_ocr_text(best[1])
 
 
+def _transformer_handwriting_ocr(image: Image.Image) -> str:
+    """Optional TrOCR pass for users who install requirements-advanced.txt."""
+    global _TROCR_MODEL, _TROCR_PROCESSOR
+
+    try:
+        import torch
+        from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+    except ImportError as exc:
+        raise OCRDependencyError(
+            "Advanced handwriting OCR is not installed. Run: pip install -r requirements-advanced.txt"
+        ) from exc
+
+    if _TROCR_PROCESSOR is None or _TROCR_MODEL is None:
+        model_name = "microsoft/trocr-base-handwritten"
+        _TROCR_PROCESSOR = TrOCRProcessor.from_pretrained(model_name)
+        _TROCR_MODEL = VisionEncoderDecoderModel.from_pretrained(model_name)
+        _TROCR_MODEL.eval()
+
+    try:
+        prepared = _blue_ink_variant(image)
+    except Exception:
+        prepared = _preprocess_image(image)
+
+    line_images = _segment_line_images(prepared)
+    if len(line_images) < 2:
+        return ""
+
+    texts = []
+    batch_size = 8
+    for start in range(0, len(line_images), batch_size):
+        batch = [line.convert("RGB") for line in line_images[start : start + batch_size]]
+        pixel_values = _TROCR_PROCESSOR(images=batch, return_tensors="pt").pixel_values
+        with torch.no_grad():
+            generated_ids = _TROCR_MODEL.generate(pixel_values, max_new_tokens=96)
+        texts.extend(_TROCR_PROCESSOR.batch_decode(generated_ids, skip_special_tokens=True))
+    return _clean_ocr_text("\n".join(texts))
+
+
+def _combine_ocr_candidates(tesseract_text: str, transformer_text: str) -> str:
+    if not transformer_text.strip():
+        return tesseract_text
+    if _quality_score(transformer_text) > _quality_score(tesseract_text) * 0.8:
+        return transformer_text
+    return tesseract_text
+
+
 def _ocr_ruled_paper_lines(pytesseract, image: Image.Image) -> str:
     line_boxes = _detect_ruled_line_bands(image)
     if len(line_boxes) < 3:
@@ -501,17 +551,20 @@ def _preprocessed_variants(image: Image.Image) -> list[Image.Image]:
     return variants
 
 
-def extract_text_from_image(path: Path) -> str:
+def extract_text_from_image(path: Path, engine: str = "standard") -> str:
     pytesseract = _import_pytesseract()
     try:
         image = Image.open(path)
     except Exception as exc:
         raise OCRDependencyError(f"Could not open image file: {exc}") from exc
 
-    return _best_ocr_result(pytesseract, _preprocessed_variants(image), image)
+    standard_text = _best_ocr_result(pytesseract, _preprocessed_variants(image), image)
+    if engine == "transformer":
+        return _combine_ocr_candidates(standard_text, _transformer_handwriting_ocr(image))
+    return standard_text
 
 
-def extract_text_from_pdf(path: Path) -> str:
+def extract_text_from_pdf(path: Path, engine: str = "standard") -> str:
     pytesseract = _import_pytesseract()
     try:
         import fitz
@@ -533,16 +586,18 @@ def extract_text_from_pdf(path: Path) -> str:
         pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
         image = Image.frombytes("RGB", [pixmap.width, pixmap.height], pixmap.samples)
         page_text = _fast_pdf_ocr(pytesseract, image)
+        if engine == "transformer":
+            page_text = _combine_ocr_candidates(page_text, _transformer_handwriting_ocr(image))
         if page_text:
             texts.append(page_text)
 
     return "\n\n".join(texts).strip()
 
 
-def extract_text(path: Path) -> str:
+def extract_text(path: Path, engine: str = "standard") -> str:
     suffix = path.suffix.lower()
     if suffix == ".pdf":
-        return extract_text_from_pdf(path)
+        return extract_text_from_pdf(path, engine)
     if suffix in {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"}:
-        return extract_text_from_image(path)
+        return extract_text_from_image(path, engine)
     raise OCRDependencyError("Unsupported file type. Please upload PDF, JPG, PNG, WEBP, or TIFF.")

@@ -1,4 +1,6 @@
 import shutil
+import importlib.util
+import sys
 from pathlib import Path
 from uuid import uuid4
 
@@ -10,6 +12,7 @@ from database import clear_history, delete_evaluation, get_evaluation, init_db, 
 from demo_data import as_dict as demo_rubric
 from evaluator import evaluate_answer
 from ocr import OCRDependencyError, correct_text_with_context, extract_text
+from report_service import create_evaluation_report
 
 
 app = Flask(__name__)
@@ -53,6 +56,11 @@ def health():
             "status": "ok",
             "version": APP_VERSION,
             "tesseract_available": shutil.which("tesseract") is not None,
+            "transformer_available": (
+                importlib.util.find_spec("torch") is not None
+                and importlib.util.find_spec("transformers") is not None
+            ),
+            "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
             "scoring_mode": "OCR-tolerant concept and rubric evaluation",
         }
     )
@@ -87,8 +95,12 @@ def evaluate():
     saved_path = UPLOAD_DIR / saved_name
     upload.save(saved_path)
 
+    ocr_engine = request.form.get("ocr_engine", "standard").strip()
+    if ocr_engine not in {"standard", "transformer"}:
+        ocr_engine = "standard"
+
     try:
-        extracted_text = extract_text(saved_path)
+        extracted_text = extract_text(saved_path, engine=ocr_engine)
     except OCRDependencyError as exc:
         return jsonify({"error": str(exc), "setup_hint": "Install Tesseract and Python packages first."}), 500
     except Exception as exc:
@@ -122,6 +134,8 @@ def evaluate():
         max_score=max_score,
     )
 
+    result_payload = result.as_dict()
+    result_payload["ocr_engine"] = ocr_engine
     payload = {
         "student_name": student_name,
         "question": question,
@@ -132,7 +146,7 @@ def evaluate():
         "score": result.score,
         "max_score": result.max_score,
         "confidence": result.confidence,
-        "result": result.as_dict(),
+        "result": result_payload,
     }
     evaluation_id = save_evaluation(payload)
 
@@ -142,7 +156,7 @@ def evaluate():
             "student_name": student_name,
             "file_name": original_name,
             "extracted_text": extracted_text,
-            "result": result.as_dict(),
+            "result": result_payload,
         }
     )
 
@@ -171,6 +185,8 @@ def rescore():
         marking_points_text=marking_points,
         max_score=max_score,
     )
+    result_payload = result.as_dict()
+    result_payload["ocr_engine"] = "edited_text"
     payload = {
         "student_name": student_name,
         "question": question,
@@ -181,7 +197,7 @@ def rescore():
         "score": result.score,
         "max_score": result.max_score,
         "confidence": result.confidence,
-        "result": result.as_dict(),
+        "result": result_payload,
     }
     evaluation_id = save_evaluation(payload)
     return jsonify(
@@ -190,7 +206,7 @@ def rescore():
             "student_name": student_name,
             "file_name": "edited_ocr_text",
             "extracted_text": extracted_text,
-            "result": result.as_dict(),
+            "result": result_payload,
         }
     )
 
@@ -201,24 +217,13 @@ def report(evaluation_id: int):
     if item is None:
         return jsonify({"error": "Evaluation not found"}), 404
 
-    report_path = DATA_DIR / f"evaluation_report_{evaluation_id}.txt"
-    lines = [
-        "AI Answer Sheet Evaluation Report",
-        "=" * 36,
-        f"Student: {item['student_name']}",
-        f"File: {item['file_name']}",
-        f"Score: {item['score']} / {item['max_score']}",
-        f"Confidence: {item['confidence']}",
-        f"Date: {item['created_at']}",
-        "",
-        "Feedback:",
-        *[f"- {point}" for point in item["result"]["feedback"]],
-        "",
-        "Extracted Answer:",
-        item["extracted_text"],
-    ]
-    report_path.write_text("\n".join(lines), encoding="utf-8")
-    return send_file(report_path, as_attachment=True)
+    report_path = create_evaluation_report(item)
+    return send_file(
+        report_path,
+        as_attachment=True,
+        download_name=f"evaluation_report_{evaluation_id}.pdf",
+        mimetype="application/pdf",
+    )
 
 
 startup()

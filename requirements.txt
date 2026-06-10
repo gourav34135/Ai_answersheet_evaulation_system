@@ -5,4 +5,5 @@ pytesseract==0.3.13
 scikit-learn==1.7.1
 numpy==2.3.2
 opencv-python-headless==4.10.0.84
+reportlab==4.4.2
 Werkzeug==3.1.3
