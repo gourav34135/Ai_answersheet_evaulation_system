@@ -2,6 +2,7 @@ from pathlib import Path
 
 
 BASE_DIR = Path(__file__).resolve().parent
+APP_VERSION = "2.0.0"
 UPLOAD_DIR = BASE_DIR / "uploads"
 DATA_DIR = BASE_DIR / "data"
 DATABASE_PATH = DATA_DIR / "evaluations.db"

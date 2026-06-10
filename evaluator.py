@@ -2,6 +2,7 @@ import math
 import re
 from collections import Counter
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 
 import numpy as np
 from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS, TfidfVectorizer
@@ -9,6 +10,53 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 
 TOKEN_PATTERN = re.compile(r"[a-zA-Z][a-zA-Z0-9']+")
+DOMAIN_TERMS = {
+    "algorithm",
+    "algorithms",
+    "artificial",
+    "automatically",
+    "branch",
+    "collection",
+    "computer",
+    "computers",
+    "cross",
+    "data",
+    "dataset",
+    "datasets",
+    "decisions",
+    "detection",
+    "examples",
+    "features",
+    "generalize",
+    "human",
+    "image",
+    "intelligence",
+    "labels",
+    "labeled",
+    "learning",
+    "machine",
+    "model",
+    "models",
+    "noise",
+    "output",
+    "overfitting",
+    "patterns",
+    "performance",
+    "prediction",
+    "predictions",
+    "recognition",
+    "recommendation",
+    "regularization",
+    "relationship",
+    "speech",
+    "spam",
+    "subset",
+    "supervised",
+    "systems",
+    "testing",
+    "training",
+    "validation",
+}
 
 
 @dataclass
@@ -49,6 +97,14 @@ def tokenize(text: str) -> list[str]:
     ]
 
 
+def relaxed_tokens(text: str) -> list[str]:
+    return [
+        token.lower()
+        for token in TOKEN_PATTERN.findall(text)
+        if len(token) > 2 and token.lower() not in ENGLISH_STOP_WORDS
+    ]
+
+
 def split_marking_points(text: str) -> list[str]:
     if not text.strip():
         return []
@@ -72,6 +128,7 @@ def text_similarity(student_answer: str, reference_answer: str) -> float:
     if not student_answer.strip() or not reference_answer.strip():
         return 0.0
 
+    word_score = 0.0
     try:
         vectorizer = TfidfVectorizer(
             lowercase=True,
@@ -80,38 +137,215 @@ def text_similarity(student_answer: str, reference_answer: str) -> float:
             max_features=3000,
         )
         matrix = vectorizer.fit_transform([student_answer, reference_answer])
-        return float(cosine_similarity(matrix[0], matrix[1])[0][0])
+        word_score = float(cosine_similarity(matrix[0], matrix[1])[0][0])
     except ValueError:
         student_tokens = set(tokenize(student_answer))
         reference_tokens = set(tokenize(reference_answer))
         if not student_tokens or not reference_tokens:
-            return 0.0
-        return len(student_tokens & reference_tokens) / len(student_tokens | reference_tokens)
+            word_score = 0.0
+        else:
+            word_score = len(student_tokens & reference_tokens) / len(student_tokens | reference_tokens)
+
+    char_score = character_similarity(student_answer, reference_answer)
+    fuzzy_score = fuzzy_keyword_coverage(student_answer, reference_answer)
+    ocr_tolerant_score = (0.55 * char_score) + (0.45 * fuzzy_score)
+    return float(np.clip(max(word_score, ocr_tolerant_score), 0.0, 1.0))
 
 
-def point_coverage(student_answer: str, points: list[str]) -> tuple[float, list[str], list[str]]:
+def character_similarity(student_answer: str, reference_answer: str) -> float:
+    try:
+        vectorizer = TfidfVectorizer(
+            analyzer="char_wb",
+            lowercase=True,
+            ngram_range=(3, 5),
+            max_features=5000,
+        )
+        matrix = vectorizer.fit_transform([student_answer, reference_answer])
+        return float(cosine_similarity(matrix[0], matrix[1])[0][0])
+    except ValueError:
+        return 0.0
+
+
+def fuzzy_keyword_coverage(student_answer: str, reference_answer: str, limit: int = 80) -> float:
+    student_tokens = relaxed_tokens(student_answer)
+    key_terms = extract_key_terms(reference_answer, limit=limit)
+    if not student_tokens or not key_terms:
+        return 0.0
+
+    matched = sum(1 for term in key_terms if best_token_match(term, student_tokens) >= token_threshold(term))
+    return matched / len(key_terms)
+
+
+def extract_key_terms(text: str, limit: int = 40) -> list[str]:
+    tokens = relaxed_tokens(text)
+    if not tokens:
+        return []
+
+    counts = Counter(tokens)
+    scored_terms = []
+    for term, count in counts.items():
+        if len(term) < 4 and term not in {"ai"}:
+            continue
+        score = count
+        if term in DOMAIN_TERMS:
+            score += 3
+        if len(term) >= 8:
+            score += 0.5
+        scored_terms.append((score, term))
+
+    scored_terms.sort(key=lambda item: (-item[0], item[1]))
+    return [term for _, term in scored_terms[:limit]]
+
+
+def best_token_match(term: str, student_tokens: list[str] | set[str]) -> float:
+    if not term:
+        return 0.0
+    if term in student_tokens:
+        return 1.0
+
+    best = 0.0
+    for token in student_tokens:
+        if abs(len(token) - len(term)) > max(4, len(term) // 2):
+            continue
+        score = SequenceMatcher(None, term, token).ratio()
+        if token[:1] == term[:1]:
+            score += 0.04
+        if len(term) >= 6 and token[-3:] == term[-3:]:
+            score += 0.07
+        best = max(best, min(score, 1.0))
+    return best
+
+
+def token_threshold(term: str) -> float:
+    if len(term) >= 10:
+        return 0.62
+    if len(term) >= 7:
+        return 0.68
+    if len(term) >= 5:
+        return 0.74
+    return 0.82
+
+
+def reference_concept_coverage(student_answer: str, reference_answer: str) -> float:
+    blocks = split_reference_blocks(reference_answer)
+    if not blocks:
+        return fuzzy_keyword_coverage(student_answer, reference_answer)
+
+    scores = []
+    for block in blocks:
+        terms = extract_key_terms(block, limit=18)
+        if not terms:
+            continue
+        student_tokens = relaxed_tokens(student_answer)
+        matched = sum(1 for term in terms if best_token_match(term, student_tokens) >= token_threshold(term))
+        scores.append(matched / len(terms))
+    return float(np.mean(scores)) if scores else 0.0
+
+
+def split_reference_blocks(reference_answer: str) -> list[str]:
+    text = reference_answer.strip()
+    if not text:
+        return []
+
+    matches = list(re.finditer(r"(?m)^\s*\d+\.\s+", text))
+    if len(matches) < 2:
+        return [text]
+
+    blocks = []
+    for index, match in enumerate(matches):
+        start = match.start()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        block = text[start:end].strip()
+        if block:
+            blocks.append(block)
+    return blocks
+
+
+def point_coverage(
+    student_answer: str,
+    points: list[str],
+    reference_answer: str = "",
+) -> tuple[float, list[str], list[str]]:
     if not points:
         return 0.0, [], []
 
     matched = []
     missing = []
     student_clean = normalize_text(student_answer)
-    student_tokens = set(tokenize(student_answer))
+    student_tokens = relaxed_tokens(student_answer)
 
     for point in points:
         point_clean = normalize_text(point)
-        point_tokens = set(tokenize(point))
+        point_tokens = relaxed_tokens(point)
         token_overlap = 0.0
         if point_tokens:
-            token_overlap = len(student_tokens & point_tokens) / len(point_tokens)
+            token_overlap = sum(
+                1
+                for token in point_tokens
+                if best_token_match(token, student_tokens) >= token_threshold(token)
+            ) / len(point_tokens)
 
         exactish_match = point_clean and point_clean in student_clean
-        if exactish_match or token_overlap >= 0.45:
+        generic_match = generic_marking_point_match(point, student_answer, reference_answer)
+        if exactish_match or token_overlap >= 0.45 or generic_match:
             matched.append(point)
         else:
             missing.append(point)
 
     return len(matched) / len(points), matched, missing
+
+
+def generic_marking_point_match(point: str, student_answer: str, reference_answer: str) -> bool:
+    point_clean = normalize_text(point)
+    if not reference_answer.strip():
+        return False
+
+    concept_score = reference_concept_coverage(student_answer, reference_answer)
+    term_count = count_domain_terms(student_answer, reference_answer)
+
+    if "example" in point_clean or "relevant example" in point_clean:
+        return has_relevant_example(student_answer, reference_answer)
+    if "terminology" in point_clean or "correct term" in point_clean:
+        return term_count >= 8 or concept_score >= 0.32
+    if "feature" in point_clean or "important" in point_clean or "explains" in point_clean:
+        return term_count >= 10 or concept_score >= 0.36
+    if "define" in point_clean or "concept" in point_clean:
+        return concept_score >= 0.24 or count_domain_terms(student_answer, reference_answer, limit=12) >= 5
+    if "conclude" in point_clean or "result" in point_clean or "correct" in point_clean:
+        return concept_score >= 0.30
+    return False
+
+
+def count_domain_terms(student_answer: str, reference_answer: str, limit: int = 40) -> int:
+    student_tokens = relaxed_tokens(student_answer)
+    key_terms = extract_key_terms(reference_answer, limit=limit)
+    return sum(1 for term in key_terms if best_token_match(term, student_tokens) >= token_threshold(term))
+
+
+def has_relevant_example(student_answer: str, reference_answer: str) -> bool:
+    reference_terms = extract_key_terms(reference_answer, limit=80)
+    example_terms = {
+        "recommendation",
+        "image",
+        "recognition",
+        "speech",
+        "spam",
+        "detection",
+        "house",
+        "price",
+        "prediction",
+        "validation",
+        "testing",
+        "cross",
+        "regularization",
+    }
+    expected_examples = [term for term in reference_terms if term in example_terms]
+    if not expected_examples:
+        return False
+
+    student_tokens = relaxed_tokens(student_answer)
+    hits = sum(1 for term in expected_examples if best_token_match(term, student_tokens) >= token_threshold(term))
+    return hits >= 2
 
 
 def length_quality(student_answer: str, reference_answer: str) -> float:
@@ -167,14 +401,21 @@ def evaluate_answer(
         marking_points = extract_keywords(reference_answer, limit=10)
 
     similarity = text_similarity(student_answer, reference_answer)
-    coverage, matched, missing = point_coverage(student_answer, marking_points)
+    coverage, matched, missing = point_coverage(student_answer, marking_points, reference_answer)
+    concept_coverage = reference_concept_coverage(student_answer, reference_answer)
     completeness = length_quality(student_answer, reference_answer)
     readability = readability_quality(student_answer)
 
     if reference_answer and marking_points:
-        raw = (0.5 * similarity) + (0.35 * coverage) + (0.1 * completeness) + (0.05 * readability)
+        raw = (
+            (0.35 * similarity)
+            + (0.25 * concept_coverage)
+            + (0.25 * coverage)
+            + (0.1 * completeness)
+            + (0.05 * readability)
+        )
     elif reference_answer:
-        raw = (0.75 * similarity) + (0.15 * completeness) + (0.1 * readability)
+        raw = (0.5 * similarity) + (0.3 * concept_coverage) + (0.12 * completeness) + (0.08 * readability)
     elif marking_points:
         raw = (0.75 * coverage) + (0.15 * completeness) + (0.1 * readability)
     else:
@@ -203,6 +444,7 @@ def evaluate_answer(
         confidence=confidence,
         metrics={
             "semantic_similarity": round(similarity, 3),
+            "concept_coverage": round(concept_coverage, 3),
             "key_point_coverage": round(coverage, 3),
             "answer_completeness": round(completeness, 3),
             "readability": round(readability, 3),

@@ -1,13 +1,15 @@
+import shutil
 from pathlib import Path
 from uuid import uuid4
 
 from flask import Flask, jsonify, render_template, request, send_file
 from werkzeug.utils import secure_filename
 
-from config import ALLOWED_EXTENSIONS, DATA_DIR, DEFAULT_MAX_SCORE, MAX_CONTENT_LENGTH, UPLOAD_DIR
-from database import delete_evaluation, get_evaluation, init_db, list_evaluations, save_evaluation
+from config import ALLOWED_EXTENSIONS, APP_VERSION, DATA_DIR, DEFAULT_MAX_SCORE, MAX_CONTENT_LENGTH, UPLOAD_DIR
+from database import clear_history, delete_evaluation, get_evaluation, init_db, list_evaluations, save_evaluation
+from demo_data import as_dict as demo_rubric
 from evaluator import evaluate_answer
-from ocr import OCRDependencyError, extract_text
+from ocr import OCRDependencyError, correct_text_with_context, extract_text
 
 
 app = Flask(__name__)
@@ -31,6 +33,29 @@ def index():
 @app.route("/api/history", methods=["GET"])
 def history():
     return jsonify({"items": list_evaluations()})
+
+
+@app.route("/api/history", methods=["DELETE"])
+def history_clear():
+    clear_history()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/demo-rubric", methods=["GET"])
+def get_demo_rubric():
+    return jsonify(demo_rubric())
+
+
+@app.route("/api/health", methods=["GET"])
+def health():
+    return jsonify(
+        {
+            "status": "ok",
+            "version": APP_VERSION,
+            "tesseract_available": shutil.which("tesseract") is not None,
+            "scoring_mode": "OCR-tolerant concept and rubric evaluation",
+        }
+    )
 
 
 @app.route("/api/history/<int:evaluation_id>", methods=["GET"])
@@ -69,6 +94,13 @@ def evaluate():
     except Exception as exc:
         return jsonify({"error": f"OCR failed: {exc}"}), 500
 
+    student_name = request.form.get("student_name", "Unknown Student").strip() or "Unknown Student"
+    question = request.form.get("question", "").strip()
+    reference_answer = request.form.get("reference_answer", "").strip()
+    marking_points = request.form.get("marking_points", "").strip()
+    correction_context = " ".join([question, reference_answer, marking_points])
+    extracted_text = correct_text_with_context(extracted_text, correction_context)
+
     if len(extracted_text.strip()) < 5:
         return jsonify(
             {
@@ -76,11 +108,6 @@ def evaluate():
                 "extracted_text": extracted_text,
             }
         ), 422
-
-    student_name = request.form.get("student_name", "Unknown Student").strip() or "Unknown Student"
-    question = request.form.get("question", "").strip()
-    reference_answer = request.form.get("reference_answer", "").strip()
-    marking_points = request.form.get("marking_points", "").strip()
 
     try:
         max_score = float(request.form.get("max_score", DEFAULT_MAX_SCORE))
@@ -114,6 +141,54 @@ def evaluate():
             "id": evaluation_id,
             "student_name": student_name,
             "file_name": original_name,
+            "extracted_text": extracted_text,
+            "result": result.as_dict(),
+        }
+    )
+
+
+@app.route("/api/rescore", methods=["POST"])
+def rescore():
+    data = request.get_json(silent=True) or {}
+    extracted_text = str(data.get("extracted_text", "")).strip()
+    if len(extracted_text) < 5:
+        return jsonify({"error": "Please enter readable extracted text before re-scoring."}), 400
+
+    student_name = str(data.get("student_name", "Edited OCR")).strip() or "Edited OCR"
+    question = str(data.get("question", "")).strip()
+    reference_answer = str(data.get("reference_answer", "")).strip()
+    marking_points = str(data.get("marking_points", "")).strip()
+
+    try:
+        max_score = float(data.get("max_score", DEFAULT_MAX_SCORE))
+    except (TypeError, ValueError):
+        max_score = DEFAULT_MAX_SCORE
+    max_score = min(max(max_score, 1.0), 100.0)
+
+    result = evaluate_answer(
+        student_answer=extracted_text,
+        reference_answer=reference_answer,
+        marking_points_text=marking_points,
+        max_score=max_score,
+    )
+    payload = {
+        "student_name": student_name,
+        "question": question,
+        "reference_answer": reference_answer,
+        "marking_points": marking_points,
+        "file_name": "edited_ocr_text",
+        "extracted_text": extracted_text,
+        "score": result.score,
+        "max_score": result.max_score,
+        "confidence": result.confidence,
+        "result": result.as_dict(),
+    }
+    evaluation_id = save_evaluation(payload)
+    return jsonify(
+        {
+            "id": evaluation_id,
+            "student_name": student_name,
+            "file_name": "edited_ocr_text",
             "extracted_text": extracted_text,
             "result": result.as_dict(),
         }

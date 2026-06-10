@@ -11,10 +11,11 @@
         <section class="workspace">
             <header class="topbar">
                 <div>
-                    <p class="eyebrow">Local OCR + NLP</p>
+                    <p class="eyebrow">Local OCR + NLP / Version 2.0</p>
                     <h1>AI Answer Sheet Evaluator</h1>
                 </div>
                 <div class="top-actions">
+                    <button class="ghost-button" id="loadDemoBtn" type="button">Load Demo Rubric</button>
                     <button class="ghost-button" id="refreshHistoryBtn" type="button">Refresh History</button>
                     <a class="ghost-button" href="#historyPanel">History</a>
                 </div>
@@ -84,12 +85,12 @@
                             <strong id="metricSimilarity">0.000</strong>
                         </div>
                         <div>
-                            <span>Coverage</span>
-                            <strong id="metricCoverage">0.000</strong>
+                            <span>Concepts</span>
+                            <strong id="metricConcepts">0.000</strong>
                         </div>
                         <div>
-                            <span>Completeness</span>
-                            <strong id="metricCompleteness">0.000</strong>
+                            <span>Rubric</span>
+                            <strong id="metricCoverage">0.000</strong>
                         </div>
                         <div>
                             <span>Words</span>
@@ -103,9 +104,12 @@
                 <article class="text-panel">
                     <div class="section-title">
                         <h2>Extracted Text</h2>
-                        <button class="ghost-button compact" id="copyTextBtn" type="button">Copy</button>
+                        <div class="top-actions">
+                            <button class="ghost-button compact" id="copyTextBtn" type="button">Copy</button>
+                            <button class="ghost-button compact" id="rescoreBtn" type="button">Re-score Text</button>
+                        </div>
                     </div>
-                    <pre id="extractedText">OCR output will appear here.</pre>
+                    <textarea id="extractedText" rows="14">OCR output will appear here.</textarea>
                 </article>
 
                 <article class="text-panel">
@@ -132,6 +136,7 @@
                     <p class="eyebrow">Saved locally</p>
                     <h2>History</h2>
                 </div>
+                <button class="ghost-button compact" id="clearHistoryBtn" type="button">Clear</button>
             </div>
             <div id="historyList" class="history-list"></div>
         </aside>

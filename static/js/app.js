@@ -13,7 +13,10 @@ const matchedPoints = document.querySelector("#matchedPoints");
 const missingPoints = document.querySelector("#missingPoints");
 const historyList = document.querySelector("#historyList");
 const refreshHistoryBtn = document.querySelector("#refreshHistoryBtn");
+const loadDemoBtn = document.querySelector("#loadDemoBtn");
+const clearHistoryBtn = document.querySelector("#clearHistoryBtn");
 const copyTextBtn = document.querySelector("#copyTextBtn");
+const rescoreBtn = document.querySelector("#rescoreBtn");
 const toast = document.querySelector("#toast");
 
 let toastTimer = null;
@@ -60,16 +63,24 @@ function renderResult(payload) {
     scoreValue.textContent = `${score} / ${maxScore}`;
     scoreMeter.style.width = `${Math.max(0, Math.min(100, percentage))}%`;
     confidenceValue.textContent = `Confidence: ${result.confidence}`;
-    extractedText.textContent = payload.extracted_text || "No extracted text available.";
+    setExtractedText(payload.extracted_text || "No extracted text available.");
 
     renderList(feedbackList, result.feedback, "No feedback available.");
     renderList(matchedPoints, result.matched_points, "No matched points detected.");
     renderList(missingPoints, result.missing_points, "No missing points detected.");
 
     document.querySelector("#metricSimilarity").textContent = result.metrics.semantic_similarity.toFixed(3);
+    document.querySelector("#metricConcepts").textContent = (result.metrics.concept_coverage || 0).toFixed(3);
     document.querySelector("#metricCoverage").textContent = result.metrics.key_point_coverage.toFixed(3);
-    document.querySelector("#metricCompleteness").textContent = result.metrics.answer_completeness.toFixed(3);
     document.querySelector("#metricWords").textContent = result.metrics.word_count;
+}
+
+function setExtractedText(value) {
+    extractedText.value = value;
+}
+
+function getExtractedText() {
+    return extractedText.value || "";
 }
 
 async function loadHistory() {
@@ -161,10 +172,14 @@ form.addEventListener("submit", async (event) => {
 resetBtn.addEventListener("click", () => {
     setTimeout(() => {
         updateFileName();
-        extractedText.textContent = "OCR output will appear here.";
+        setExtractedText("OCR output will appear here.");
         scoreValue.textContent = "0 / 10";
         scoreMeter.style.width = "0";
         confidenceValue.textContent = "Waiting for an answer sheet";
+        document.querySelector("#metricSimilarity").textContent = "0.000";
+        document.querySelector("#metricConcepts").textContent = "0.000";
+        document.querySelector("#metricCoverage").textContent = "0.000";
+        document.querySelector("#metricWords").textContent = "0";
         renderList(feedbackList, ["Upload an answer sheet and add a reference answer for the most reliable result."], "");
         renderList(matchedPoints, [], "No matched points detected.");
         renderList(missingPoints, [], "No missing points detected.");
@@ -173,6 +188,37 @@ resetBtn.addEventListener("click", () => {
 
 refreshHistoryBtn.addEventListener("click", () => {
     loadHistory().then(() => showToast("History refreshed."));
+});
+
+clearHistoryBtn.addEventListener("click", async () => {
+    if (!window.confirm("Clear all saved evaluation history?")) {
+        return;
+    }
+    const response = await fetch("/api/history", { method: "DELETE" });
+    const data = await response.json();
+    if (!response.ok) {
+        showToast(data.error || "Could not clear history.");
+        return;
+    }
+    await loadHistory();
+    showToast("Evaluation history cleared.");
+});
+
+loadDemoBtn.addEventListener("click", async () => {
+    try {
+        const response = await fetch("/api/demo-rubric");
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || "Could not load demo rubric.");
+        }
+        form.elements.question.value = data.questions;
+        form.elements.reference_answer.value = data.reference_answers;
+        form.elements.marking_points.value = data.marking_points;
+        form.elements.max_score.value = data.max_score;
+        showToast("Five-question demo rubric loaded.");
+    } catch (error) {
+        showToast(error.message);
+    }
 });
 
 historyList.addEventListener("click", async (event) => {
@@ -209,8 +255,39 @@ historyList.addEventListener("click", async (event) => {
 });
 
 copyTextBtn.addEventListener("click", async () => {
-    await navigator.clipboard.writeText(extractedText.textContent);
+    await navigator.clipboard.writeText(getExtractedText());
     showToast("Extracted text copied.");
+});
+
+rescoreBtn.addEventListener("click", async () => {
+    const payload = {
+        extracted_text: getExtractedText(),
+        student_name: new FormData(form).get("student_name") || "Edited OCR",
+        question: new FormData(form).get("question") || "",
+        reference_answer: new FormData(form).get("reference_answer") || "",
+        marking_points: new FormData(form).get("marking_points") || "",
+        max_score: new FormData(form).get("max_score") || "10",
+    };
+
+    setLoading(true);
+    try {
+        const response = await fetch("/api/rescore", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || "Re-score failed.");
+        }
+        renderResult(data);
+        await loadHistory();
+        showToast("Edited text re-scored and saved.");
+    } catch (error) {
+        showToast(error.message);
+    } finally {
+        setLoading(false);
+    }
 });
 
 loadHistory();

@@ -338,7 +338,8 @@ textarea:focus {
     padding: 18px;
 }
 
-pre {
+pre,
+#extractedText {
     min-height: 260px;
     max-height: 480px;
     overflow: auto;
@@ -350,6 +351,12 @@ pre {
     background: #f8faf8;
     line-height: 1.6;
     white-space: pre-wrap;
+}
+
+#extractedText {
+    display: block;
+    resize: vertical;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 }
 
 .points-columns {
